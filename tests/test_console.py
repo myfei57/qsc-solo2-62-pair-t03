@@ -44,7 +44,7 @@ class ConsoleCase(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(
             {check["name"] for check in checks["checks"]},
-            {"store", "interlock", "ammonia", "temp", "compressors", "fans", "evap", "rooms"},
+            {"store", "interlock", "sequence", "ammonia", "temp", "compressors", "fans", "evap", "rooms"},
         )
 
         status, snapshot = self.call("GET", "/snapshot")
@@ -60,6 +60,7 @@ class ConsoleCase(unittest.TestCase):
                 "temp",
                 "ammonia",
                 "interlock",
+                "sequence",
                 "cold_fans",
                 "evap",
                 "defrost",
@@ -316,6 +317,86 @@ class ConsoleCase(unittest.TestCase):
         self.assertFalse(body["tripped"])
         status, body = self.call("POST", "/interlock/clear", {})
         self.assertEqual(body["count"], 0)
+
+    def test_sequence_routes(self) -> None:
+        status, body = self.call("POST", "/comp/add", {"id": "c1", "stages": 2})
+        self.assertEqual(status, 200)
+
+        # no feedback established yet: the interlocked start refuses
+        status, body = self.call(
+            "POST", "/sequence/start", {"id": "c1", "operator": "张三", "role": "operator", "at": 1.0}
+        )
+        self.assertEqual(status, 200)
+        self.assertFalse(body["allowed"])
+
+        # establish feedback: valve closed, compressor stopped
+        self.call(
+            "POST",
+            "/sequence/feedback",
+            {"id": "c1", "at": 1.0, "open_limit": False, "close_limit": True, "running": False},
+        )
+        self.call("POST", "/sequence/tick", {"id": "c1", "at": 2.0})
+
+        # a viewer may not run the sequence
+        status, body = self.call(
+            "POST", "/sequence/start", {"id": "c1", "operator": "王五", "role": "viewer", "at": 2.0}
+        )
+        self.assertFalse(body["allowed"])
+
+        # L1 runs the interlocked start
+        status, body = self.call(
+            "POST", "/sequence/start", {"id": "c1", "operator": "张三", "role": "operator", "at": 2.0}
+        )
+        self.assertTrue(body["allowed"])
+        self.assertEqual(body["phase"], "OPENING")
+        cycle = body["cycle"]
+
+        # open limit confirmed, settle window passes, compressor starts automatically
+        self.call(
+            "POST", "/sequence/feedback", {"id": "c1", "at": 3.0, "open_limit": True, "close_limit": False}
+        )
+        self.call("POST", "/sequence/tick", {"id": "c1", "at": 4.5})
+        status, body = self.call("POST", "/sequence/tick", {"id": "c1", "at": 8.0})
+        self.assertEqual(body["phase"], "STARTING")
+        self.call("POST", "/sequence/feedback", {"id": "c1", "at": 9.0, "running": True})
+        status, body = self.call("POST", "/sequence/tick", {"id": "c1", "at": 10.5})
+        self.assertEqual(body["phase"], "RUNNING")
+
+        # running feedback lost beyond the hold limit: fallback stops then closes
+        self.call("POST", "/sequence/feedback", {"id": "c1", "at": 11.0, "open_limit": False})
+        self.call("POST", "/sequence/tick", {"id": "c1", "at": 12.5})
+        status, body = self.call("POST", "/sequence/tick", {"id": "c1", "at": 18.0})
+        self.assertEqual(body["phase"], "FALLBACK_STOP")
+        self.assertEqual(body["valve_command"], "open")
+        self.call("POST", "/sequence/feedback", {"id": "c1", "at": 19.0, "running": False})
+        self.call("POST", "/sequence/tick", {"id": "c1", "at": 20.5})
+        self.call("POST", "/sequence/feedback", {"id": "c1", "at": 21.0, "close_limit": True})
+        status, body = self.call("POST", "/sequence/tick", {"id": "c1", "at": 22.5})
+        self.assertEqual(body["phase"], "FAULT")
+
+        # operator-level reset is refused; an engineer resets once safe
+        status, body = self.call(
+            "POST", "/sequence/reset", {"id": "c1", "operator": "张三", "role": "operator", "at": 23.0}
+        )
+        self.assertFalse(body["allowed"])
+        status, body = self.call(
+            "POST", "/sequence/reset", {"id": "c1", "operator": "李四", "role": "engineer", "at": 23.0}
+        )
+        self.assertTrue(body["reset"])
+
+        # the abnormal chain is traceable by cycle and by operator
+        status, body = self.call("POST", "/sequence/trace", {"cycle": cycle})
+        events = [entry["event"] for entry in body["entries"]]
+        self.assertIn("ALARM", events)
+        self.assertIn("FAULT", events)
+        status, body = self.call("POST", "/sequence/trace", {"operator": "张三"})
+        self.assertGreaterEqual(body["count"], 2)
+        self.assertTrue(all(entry["operator"] == "张三" for entry in body["entries"]))
+
+        status, body = self.call("GET", "/sequence")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(body["machines"]), 1)
+        self.assertEqual(body["machines"][0]["phase"], "IDLE")
 
     def test_load_and_quota_routes(self) -> None:
         self.add_room("r1", 1, -10.0)

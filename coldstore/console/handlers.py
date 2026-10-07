@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING
 
 from coldstore.ammonia import validate_ppm, validate_threshold
@@ -14,6 +15,7 @@ from coldstore.quota import Quota, check_quota, validate_amount
 from coldstore.reporting import audit_export, telemetry_export, to_csv
 from coldstore.room import validate_zone
 from coldstore.scheduler import validate_threshold as validate_schedule_threshold
+from coldstore.sequence import Operator, parse_role
 from coldstore.store import export_state
 from coldstore.temp import validate_temp
 from coldstore.valve import OPEN, validate_valve
@@ -576,6 +578,102 @@ def interlock_clear(server: "Server", request: Request) -> Response:
     interlock = server.runtime.interlock
     interlock.clear_log()
     return json_response({"count": interlock.count()})
+
+
+def _sequence_operator(request: Request) -> Operator:
+    return Operator(
+        name=request.str_field("operator", "console"),
+        role=parse_role(request.str_field("role", "viewer")),
+    )
+
+
+def _sequence_now(request: Request) -> float:
+    return request.float_field("at", 0.0) or time.time()
+
+
+def sequence_state(server: "Server", request: Request) -> Response:
+    return json_response(server.runtime.sequence.state().as_dict())
+
+
+def sequence_machine(server: "Server", request: Request) -> Response:
+    return json_response(server.runtime.sequence.machine(request.str_field("id")))
+
+
+def sequence_start(server: "Server", request: Request) -> Response:
+    result = server.runtime.sequence.start(
+        request.str_field("id"), _sequence_operator(request), _sequence_now(request)
+    )
+    return json_response(result)
+
+
+def sequence_stop(server: "Server", request: Request) -> Response:
+    result = server.runtime.sequence.stop(
+        request.str_field("id"), _sequence_operator(request), _sequence_now(request)
+    )
+    return json_response(result)
+
+
+def sequence_feedback(server: "Server", request: Request) -> Response:
+    signals = {}
+    for key in ("open_limit", "close_limit", "running"):
+        if key in request.payload:
+            signals[key] = bool(request.payload[key])
+    view = server.runtime.sequence.feedback(
+        request.str_field("id"), _sequence_now(request), **signals
+    )
+    return json_response(view)
+
+
+def sequence_tick(server: "Server", request: Request) -> Response:
+    view = server.runtime.sequence.tick(request.str_field("id"), _sequence_now(request))
+    return json_response(view)
+
+
+def sequence_bypass(server: "Server", request: Request) -> Response:
+    result = server.runtime.sequence.grant_bypass(
+        request.str_field("id"),
+        _sequence_operator(request),
+        grantee=request.str_field("grantee"),
+        reason=request.str_field("reason"),
+        now=_sequence_now(request),
+    )
+    return json_response(result)
+
+
+def sequence_release(server: "Server", request: Request) -> Response:
+    result = server.runtime.sequence.release(
+        request.str_field("id"), _sequence_operator(request), _sequence_now(request)
+    )
+    return json_response(result)
+
+
+def sequence_reset(server: "Server", request: Request) -> Response:
+    result = server.runtime.sequence.reset(
+        request.str_field("id"), _sequence_operator(request), _sequence_now(request)
+    )
+    return json_response(result)
+
+
+def sequence_timing(server: "Server", request: Request) -> Response:
+    changes = {
+        key: value
+        for key, value in request.payload.items()
+        if key not in ("operator", "role", "at")
+    }
+    result = server.runtime.sequence.set_timing(
+        _sequence_operator(request), _sequence_now(request), changes
+    )
+    return json_response(result)
+
+
+def sequence_trace(server: "Server", request: Request) -> Response:
+    entries = server.runtime.sequence.trace(
+        machine=request.str_field("machine"),
+        operator=request.str_field("operator"),
+        cycle=request.str_field("cycle"),
+        event=request.str_field("event"),
+    )
+    return json_response({"entries": entries, "count": len(entries)})
 
 
 def load_state(server: "Server", request: Request) -> Response:

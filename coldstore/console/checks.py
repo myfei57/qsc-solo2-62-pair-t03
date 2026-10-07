@@ -17,6 +17,19 @@ def run_checks(rt: Runtime) -> list[dict[str, str]]:
     else:
         checks.append({"name": "interlock", "status": "ok", "detail": "not latched"})
 
+    faulted = [view["id"] for view in rt.sequence.machines() if view["phase"] == "FAULT"]
+    held = [
+        view["id"]
+        for view in rt.sequence.machines()
+        if view["phase"] in ("HOLD", "FALLBACK_STOP", "FALLBACK_CLOSE")
+    ]
+    if faulted:
+        checks.append({"name": "sequence", "status": "fail", "detail": "faulted " + ", ".join(faulted)})
+    elif held:
+        checks.append({"name": "sequence", "status": "warn", "detail": "held " + ", ".join(held)})
+    else:
+        checks.append({"name": "sequence", "status": "ok", "detail": "no faulted machine"})
+
     if rt.ammonia.latched():
         checks.append({"name": "ammonia", "status": "fail", "detail": "trip latched"})
     elif rt.ammonia.threshold() <= 0:

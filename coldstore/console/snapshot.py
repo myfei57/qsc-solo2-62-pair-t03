@@ -20,6 +20,7 @@ def collect(rt: Runtime) -> dict[str, object]:
         "temp": rt.temp.state().as_dict(),
         "ammonia": rt.ammonia.state().as_dict(),
         "interlock": rt.interlock.state().as_dict(),
+        "sequence": rt.sequence.state().as_dict(),
         "cold_fans": rt.cold_fans.state().as_dict(),
         "evap": rt.evap.state().as_dict(),
         "defrost": rt.defrost.state().as_dict(),

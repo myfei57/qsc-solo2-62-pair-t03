@@ -13,6 +13,7 @@ from coldstore.load import LoadCalculator
 from coldstore.quota import Accumulator
 from coldstore.room import RoomRegistry
 from coldstore.scheduler import Scheduler
+from coldstore.sequence import Sequence
 from coldstore.store import Store
 from coldstore.temp import Collector
 from coldstore.valve import SupplyValve
@@ -40,3 +41,4 @@ class Runtime:
         self.accumulator = Accumulator(store)
         self.auditor = Auditor(store)
         self.scheduler = Scheduler(store)
+        self.sequence = Sequence(store, self.supply, self.compressors, self.auditor)

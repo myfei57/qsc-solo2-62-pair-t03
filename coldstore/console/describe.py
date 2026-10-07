@@ -20,6 +20,7 @@ def collect(rt: Runtime) -> dict[str, str]:
         "temp": rt.temp.describe(),
         "ammonia": rt.ammonia.describe(),
         "interlock": rt.interlock.describe(),
+        "sequence": rt.sequence.describe(),
         "cold_fans": rt.cold_fans.describe(),
         "evap": rt.evap.describe(),
         "defrost": rt.defrost.describe(),
