@@ -8,6 +8,7 @@ from coldstore.ammonia import validate_ppm, validate_threshold
 from coldstore.comp import validate_stage
 from coldstore.evap import validate_baseline
 from coldstore.fan import PRIMARY, STANDBY
+from coldstore.interlock import Actor, PermissionDenied, parse_level
 from coldstore.load import validate_baseline as validate_load_baseline
 from coldstore.ns import Stage, control_line
 from coldstore.quota import Quota, check_quota, validate_amount
@@ -24,7 +25,7 @@ from . import simulate as simulate_module
 from . import snapshot as snapshot_module
 from . import telemetry as telemetry_module
 from .cycle import run_cycle
-from .http import Request, Response, csv_response, json_response, text_response
+from .http import Request, RequestError, Response, csv_response, json_response, text_response
 from .report import text_report
 from .routes import route_table
 from .system import system_payload
@@ -576,6 +577,118 @@ def interlock_clear(server: "Server", request: Request) -> Response:
     interlock = server.runtime.interlock
     interlock.clear_log()
     return json_response({"count": interlock.count()})
+
+
+def _actor(request: Request, prefix: str = "") -> Actor:
+    """Build the operator identity attached to a guarded sequence action."""
+
+    uid = request.str_field(f"{prefix}uid")
+    if not uid:
+        raise ValueError(f"field {prefix}uid is required")
+    name = request.str_field(f"{prefix}name", uid)
+    return Actor(uid=uid, name=name, level=parse_level(request.int_field(f"{prefix}level", 0)))
+
+
+def _bool_flag(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    raise ValueError("feedback flags must be boolean")
+
+
+def _guarded(call):
+    """Map a denied permission to a 403 instead of a generic 400."""
+
+    try:
+        return call()
+    except PermissionDenied as exc:
+        raise RequestError(403, str(exc)) from exc
+
+
+def sequence_list(server: "Server", request: Request) -> Response:
+    center = server.runtime.sequence
+    return json_response({"controllers": center.snapshots(), "config": center.config.values()})
+
+
+def sequence_state(server: "Server", request: Request) -> Response:
+    controller = server.runtime.sequence.controller(request.str_field("id"))
+    return json_response(controller.snapshot().as_dict())
+
+
+def sequence_start(server: "Server", request: Request) -> Response:
+    controller = server.runtime.sequence.controller(request.str_field("id"))
+    phase = _guarded(lambda: controller.start(_actor(request)))
+    return json_response({"id": controller.snapshot().as_dict()["comp_id"], "phase": phase.value})
+
+
+def sequence_stop(server: "Server", request: Request) -> Response:
+    controller = server.runtime.sequence.controller(request.str_field("id"))
+    phase = _guarded(lambda: controller.stop(_actor(request)))
+    return json_response({"id": controller.snapshot().as_dict()["comp_id"], "phase": phase.value})
+
+
+def sequence_feedback(server: "Server", request: Request) -> Response:
+    controller = server.runtime.sequence.controller(request.str_field("id"))
+    updates = {
+        name: _bool_flag(request.payload[name])
+        for name in ("valve_open", "valve_closed", "comp_run")
+        if name in request.payload
+    }
+    if not updates:
+        raise ValueError("at least one feedback flag is required")
+    controller.set_feedback(None, **updates)
+    controller.evaluate()
+    return json_response(controller.snapshot().as_dict())
+
+
+def sequence_tick(server: "Server", request: Request) -> Response:
+    center = server.runtime.sequence
+    comp_id = request.str_field("id")
+    if comp_id:
+        controller = center.controller(comp_id)
+        controller.evaluate()
+        return json_response(controller.snapshot().as_dict())
+    return json_response({"phases": center.evaluate_all()})
+
+
+def sequence_release(server: "Server", request: Request) -> Response:
+    controller = server.runtime.sequence.controller(request.str_field("id"))
+    phase = _guarded(
+        lambda: controller.manual_release(
+            _actor(request),
+            _actor(request, "approver_"),
+            request.str_field("reason"),
+            _bool_flag(request.payload.get("field_confirmed", False)),
+        )
+    )
+    return json_response({"id": controller.snapshot().as_dict()["comp_id"], "phase": phase.value})
+
+
+def sequence_reset(server: "Server", request: Request) -> Response:
+    controller = server.runtime.sequence.controller(request.str_field("id"))
+    phase = _guarded(lambda: controller.reset(_actor(request)))
+    return json_response({"id": controller.snapshot().as_dict()["comp_id"], "phase": phase.value})
+
+
+def sequence_param(server: "Server", request: Request) -> Response:
+    center = server.runtime.sequence
+    key = request.str_field("key")
+    old, new = _guarded(lambda: center.set_param(_actor(request), key, request.float_field("value")))
+    return json_response({"key": key, "old": old, "new": new})
+
+
+def sequence_trail(server: "Server", request: Request) -> Response:
+    trail = server.runtime.sequence.trail
+    entries = trail.query(
+        actor_uid=request.str_field("actor"),
+        trace_id=request.str_field("trace"),
+        category=request.str_field("category"),
+        comp_id=request.str_field("comp"),
+    )
+    return json_response({"entries": [entry.as_dict() for entry in entries], "count": len(entries)})
 
 
 def load_state(server: "Server", request: Request) -> Response:

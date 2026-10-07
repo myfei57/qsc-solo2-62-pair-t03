@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 import tempfile
 import unittest
 
@@ -220,6 +221,52 @@ class ConsoleCase(unittest.TestCase):
 
         status, body = self.call("POST", "/comp/remove", {"id": "c1"})
         self.assertEqual(body["removed"], "c1")
+
+    def test_sequence_routes(self) -> None:
+        self.call("POST", "/comp/add", {"id": "c1", "stages": 2})
+        # Shrink the debounce so the test does not sleep on the real clock.
+        status, body = self.call(
+            "POST",
+            "/sequence/param",
+            {"uid": "u-admin", "level": 3, "key": "feedback_debounce", "value": 0.01},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(body["new"], 0.01)
+
+        # Viewers may not start the sequence.
+        status, body = self.call("POST", "/sequence/start", {"id": "c1", "uid": "u-view", "level": 0})
+        self.assertEqual(status, 403)
+
+        status, body = self.call("POST", "/sequence/start", {"id": "c1", "uid": "u-op", "level": 1})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["phase"], "VALVE_OPENING")
+
+        # The compressor stays off until the open feedback is confirmed.
+        status, body = self.call("GET", "/comp")
+        self.assertEqual(body["running"], 0)
+        status, body = self.call("POST", "/sequence/feedback", {"id": "c1", "valve_open": True})
+        time.sleep(0.02)
+        status, body = self.call("POST", "/sequence/tick", {"id": "c1"})
+        self.assertEqual(body["phase"], "COMP_STARTING")
+        status, body = self.call("POST", "/sequence/feedback", {"id": "c1", "comp_run": True})
+        self.assertEqual(body["phase"], "RUNNING")
+
+        # Normal stop: valve closes only after the compressor stop confirms.
+        status, body = self.call("POST", "/sequence/stop", {"id": "c1", "uid": "u-op", "level": 1})
+        self.assertEqual(body["phase"], "STOPPING_COMP")
+        status, body = self.call("POST", "/sequence/feedback", {"id": "c1", "comp_run": False})
+        self.assertEqual(body["phase"], "VALVE_CLOSING")
+        status, body = self.call("POST", "/sequence/feedback", {"id": "c1", "valve_closed": True})
+        self.assertEqual(body["phase"], "IDLE")
+
+        # The audit chain is traceable by operator.
+        status, body = self.call("POST", "/sequence/trail", {"actor": "u-op"})
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(body["count"], 2)
+        self.assertTrue(all(entry["actor_uid"] == "u-op" for entry in body["entries"]))
+        status, body = self.call("GET", "/sequence")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["controllers"][0]["comp_id"], "c1")
 
     def test_fan_and_evap_routes(self) -> None:
         self.call("POST", "/fan/add", {"id": "f1", "role": "primary"})
